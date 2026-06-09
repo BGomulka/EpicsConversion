@@ -3,45 +3,59 @@
 
 import re
 import sys
+import csv
 from pathlib import Path
 import argparse
 import time
+import logging
 
-try:
-    import pandas as pd
-except ImportError:
-    print("Error: The 'pandas' library is required. Install it using 'pip install pandas openpyxl'.")
-    sys.exit(1)
+logging.basicConfig(level=logging.WARNING, format='%(message)s')
+logger = logging.getLogger(__name__)
 
-def generate_epics_db(df, output_db_path):
+def write_csv(data_list, output_csv_path):
+    if not data_list:
+        return False
+        
+    headers = []
+    for d in data_list:
+        for k in d.keys():
+            if k not in headers:
+                headers.append(k)
+                
+    ordered_headers = ['Record Type', 'Record Name']
+    if 'Source File' in headers:
+        ordered_headers.append('Source File')
+    for h in headers:
+        if h not in ordered_headers:
+            ordered_headers.append(h)
+
+    with open(output_csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.DictWriter(f, fieldnames=ordered_headers)
+        writer.writeheader()
+        writer.writerows(data_list)
+    return True
+
+def generate_epics_db(data_list, output_db_path):
     db_lines = []
     
-    for _, row in df.iterrows():
-        if pd.isna(row.get('Record Type')) or pd.isna(row.get('Record Name')):
-            continue
-            
-        rec_type = str(row['Record Type']).strip()
-        rec_name = str(row['Record Name']).strip()
+    for row in data_list:
+        rec_type = str(row.get('Record Type', '')).strip()
+        rec_name = str(row.get('Record Name', '')).strip()
         
         if not rec_type or not rec_name or rec_type.lower() == 'nan':
             continue
             
         db_lines.append(f'record({rec_type}, "{rec_name}") {{')
         
-        for col in df.columns:
+        for col, val in row.items():
             if col in ['Record Type', 'Record Name', 'Source File']:
                 continue
                 
-            val = row[col]
-            if pd.isna(val):
+            if val is None:
                 continue
                 
-            if isinstance(val, float) and val.is_integer():
-                val = int(val)
-                
             val_str = str(val).strip()
-            
-            if not val_str:
+            if not val_str or val_str.lower() == 'nan':
                 continue
                 
             is_disabled = False
@@ -68,11 +82,15 @@ def generate_epics_db(df, output_db_path):
                 
         db_lines.append('}\n') 
     
-    with open(output_db_path, 'w') as f:
-        f.write('\n'.join(db_lines))
+    if not db_lines:
+        return False
 
-def parse_db_to_dataframe(db_path, source_file_name=""):
-    with open(db_path, 'r') as f:
+    with open(output_db_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(db_lines))
+    return True
+
+def parse_db_to_dicts(db_path, source_file_name=""):
+    with open(db_path, 'r', encoding='utf-8') as f:
         content = f.read()
     
     record_pattern = re.compile(r'^[ \t]*record\s*\(\s*([a-zA-Z0-9_]+)\s*,\s*"([^"]+)"\s*\)\s*\{(.*?)\}', re.MULTILINE | re.DOTALL)
@@ -99,145 +117,215 @@ def parse_db_to_dataframe(db_path, source_file_name=""):
             field_val = f_match.group(3).strip() 
             comment = f_match.group(4)
             
-            excel_val = field_val
+            csv_val = field_val
             if comment:
-                excel_val = f"{excel_val} {comment}"
+                csv_val = f"{csv_val} {comment}"
             if is_disabled:
-                excel_val = f"# {excel_val}"
+                csv_val = f"# {csv_val}"
                 
-            record_dict[field_name] = excel_val
+            record_dict[field_name] = csv_val
             
         data.append(record_dict)
             
-    return pd.DataFrame(data)
+    return data
 
-def process_db_directory(input_dir_path, output_dir_path, combine=False):
-    input_dir = Path(input_dir_path)
-    output_dir = Path(output_dir_path)
+def resolve_files(input_path, is_batch, is_test, ext):
+    in_p = Path(input_path).resolve() if input_path else Path.cwd()
+    files = []
     
-    if not input_dir.is_dir():
-        print(f"Error: Source directory '{input_dir}' does not exist.")
-        return
-        
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    db_files = list(input_dir.glob('*.db'))
-    if not db_files:
-        print(f"No .db files found in {input_dir}")
-        return
-        
-    print(f"Found {len(db_files)} .db file(s). Starting DB -> Excel conversion...")
-    
-    if combine:
-        all_dfs = []
-        for db_path in db_files:
-            try:
-                df = parse_db_to_dataframe(db_path, source_file_name=db_path.name)
-                if not df.empty:
-                    all_dfs.append(df)
-            except Exception as e:
-                print(f"  -> Unexpected Error processing {db_path.name}: {e}")
-        
-        if all_dfs:
-            combined_df = pd.concat(all_dfs, ignore_index=True)
-            
-            cols = combined_df.columns.tolist()
-            if 'Source File' in cols:
-                cols.insert(2, cols.pop(cols.index('Source File')))
-                combined_df = combined_df[cols]
-                
-            output_path = output_dir / "combined_output.xlsx"
-            combined_df.to_excel(output_path, index=False, engine='openpyxl')
-            print(f"Combined output saved to: {output_path}")
+    if is_batch:
+        if in_p.is_dir():
+            files = list(in_p.rglob(f"*{ext}"))
+        else:
+            logger.error(f"Error: Batch mode requires a directory. '{in_p}' is a file.")
+            sys.exit(1)
     else:
-        for db_path in db_files:
-            output_filename = db_path.with_suffix('.xlsx').name
-            output_path = output_dir / output_filename
-            print(f"Converting: {db_path.name} -> {output_filename}")
+        if in_p.is_file() and in_p.suffix == ext:
+            files = [in_p]
+        elif in_p.is_dir():
+            found = list(in_p.glob(f"*{ext}"))
+            if found:
+                files = [found[0]]
+                logger.info(f"Single file mode: Auto-selected first valid file '{files[0].name}'.")
             
-            try:
-                df = parse_db_to_dataframe(db_path)
-                if df.empty:
-                    print(f"  -> Warning: No valid records parsed from {db_path.name}. Skipping.")
-                    continue
-                df.to_excel(output_path, index=False, engine='openpyxl')
-            except (FileNotFoundError, PermissionError) as io_err:
-                print(f"  -> File Access Error processing {db_path.name}: {io_err}")
-            except Exception as e:
-                print(f"  -> Unexpected Error processing {db_path.name}: {e}")
+    if is_test:
+        files = [f for f in files if f.name.lower().startswith("test")]
+        if not files:
+            logger.error("\n[ERROR] Test mode validation failed! No files starting with 'test' found.")
+            sys.exit(1)
             
-    print("Batch conversion complete!\n")
+    return sorted(list(set(files))), in_p
 
-def process_excel_directory(input_dir_path, output_dir_path, split=False):
-    input_dir = Path(input_dir_path)
-    output_dir = Path(output_dir_path)
+def process_db_to_csv(args, base_output):
+    input_files, input_dir = resolve_files(args.input, args.batch, args.test, '.db')
     
-    if not input_dir.is_dir():
-        print(f"Error: Source directory '{input_dir}' does not exist.")
+    if not input_files:
+        logger.error("No valid .db files found to process.")
         return
         
-    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Found {len(input_files)} .db file(s). Starting DB -> CSV conversion...\n")
+    success_count = 0
     
-    excel_files = list(input_dir.glob('*.xlsx'))
-    if not excel_files:
-        print(f"No .xlsx files found in {input_dir}")
-        return
-
-    print(f"Found {len(excel_files)} Excel file(s). Starting Excel -> DB conversion...")
-    for excel_path in excel_files:
-        try:
-            df = pd.read_excel(excel_path, engine='openpyxl')
-            
-            if split and 'Source File' in df.columns:
-                grouped = df.groupby('Source File')
-                for source_file, group_df in grouped:
-                    source_name = str(source_file).strip()
-                    if not source_name.endswith('.db'):
-                        source_name += '.db'
-                    output_path = output_dir / source_name
-                    print(f"Converting group from {excel_path.name} -> {source_name}")
-                    generate_epics_db(group_df, output_path)
+    if args.combine:
+        all_data = []
+        for db_path in input_files:
+            try:
+                data = parse_db_to_dicts(db_path, source_file_name=db_path.name)
+                if data:
+                    all_data.extend(data)
+            except Exception as e:
+                logger.error(f"  -> Unexpected Error processing {db_path.name}: {e}")
+        
+        if all_data:
+            output_path = base_output / "combined_output.csv"
+            if write_csv(all_data, output_path):
+                logger.info(f"Combined output saved to: {output_path}")
+                success_count += len(input_files)
+    else:
+        for db_path in input_files:
+            if args.batch:
+                relative_path = db_path.relative_to(input_dir)
+                target_subdir = base_output / relative_path.parent
             else:
-                output_filename = excel_path.with_suffix('.db').name
-                output_path = output_dir / output_filename
-                print(f"Converting: {excel_path.name} -> {output_filename}")
-                generate_epics_db(df, output_path)
+                target_subdir = base_output
                 
-        except ValueError as ve:
-            print(f"  -> Format Error: Ensure openpyxl is installed and the file is a valid .xlsx file. ({ve})")
-        except (FileNotFoundError, PermissionError) as io_err:
-            print(f"  -> File Access Error processing {excel_path.name}: {io_err}")
-        except Exception as e:
-            print(f"  -> Unexpected Error processing {excel_path.name}: {e}")
+            target_subdir.mkdir(parents=True, exist_ok=True)
+            output_filename = db_path.with_suffix('.csv').name
+            output_path = target_subdir / output_filename
             
-    print("Batch conversion complete!\n")
+            logger.info(f"Converting: {db_path.name} -> {output_filename}")
+            try:
+                data = parse_db_to_dicts(db_path)
+                if not data:
+                    logger.warning(f"  -> Warning: No valid records parsed from {db_path.name}. Skipping.")
+                    continue
+                if write_csv(data, output_path):
+                    logger.info("  Status: Successfully converted")
+                    success_count += 1
+            except Exception as e:
+                logger.error(f"  -> Unexpected Error processing {db_path.name}: {e}")
+    
+    return len(input_files), success_count
+
+def process_csv_to_db(args, base_output):
+    input_files, input_dir = resolve_files(args.input, args.batch, args.test, '.csv')
+    
+    if not input_files:
+        logger.error("No valid .csv files found to process.")
+        return
+        
+    logger.info(f"Found {len(input_files)} CSV file(s). Starting CSV -> DB conversion...\n")
+    success_count = 0
+
+    for csv_path in input_files:
+        try:
+            with open(csv_path, mode='r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                data = list(reader)
+            
+            if args.split and any('Source File' in d for d in data):
+                grouped = {}
+                for row in data:
+                    src = row.get('Source File', 'unknown_source.db')
+                    if not src.endswith('.db'):
+                        src += '.db'
+                    grouped.setdefault(src, []).append(row)
+                
+                for source_name, group_data in grouped.items():
+                    target_subdir = base_output
+                    if args.batch:
+                        relative_path = csv_path.relative_to(input_dir)
+                        target_subdir = base_output / relative_path.parent
+                    target_subdir.mkdir(parents=True, exist_ok=True)
+                    
+                    output_path = target_subdir / source_name
+                    logger.info(f"Converting group from {csv_path.name} -> {source_name}")
+                    if generate_epics_db(group_data, output_path):
+                        success_count += 1
+            else:
+                target_subdir = base_output
+                if args.batch:
+                    relative_path = csv_path.relative_to(input_dir)
+                    target_subdir = base_output / relative_path.parent
+                target_subdir.mkdir(parents=True, exist_ok=True)
+                
+                output_filename = csv_path.with_suffix('.db').name
+                output_path = target_subdir / output_filename
+                logger.info(f"Converting: {csv_path.name} -> {output_filename}")
+                if generate_epics_db(data, output_path):
+                    logger.info("  Status: Successfully converted")
+                    success_count += 1
+                    
+        except Exception as e:
+            logger.error(f"  -> Unexpected Error processing {csv_path.name}: {e}")
+            
+    return len(input_files), success_count
+
+def process_pipeline(args):
+    start_time = time.time()
+    
+    if args.verbose:
+        logger.setLevel(logging.INFO)
+
+    base_output = Path(args.output).resolve() if args.output else Path.cwd()
+    
+    if args.test:
+        final_output_root = base_output / "test"
+    elif args.folder_name:
+        final_output_root = base_output / args.folder_name
+    else:
+        final_output_root = base_output
+
+    final_output_root.mkdir(parents=True, exist_ok=True)
+
+    if args.cd:
+        result = process_csv_to_db(args, final_output_root)
+    elif args.dc:
+        result = process_db_to_csv(args, final_output_root)
+        
+    if result and args.verbose:
+        total_files, success_count = result
+        elapsed_time = time.time() - start_time
+        logger.info("\n" + "="*60)
+        logger.info("EXECUTION DETAILS SUMMARY")
+        logger.info("="*60)
+        logger.info(f"Conversion Type:          {'CSV -> DB' if args.cd else 'DB -> CSV'}")
+        logger.info(f"Total Files Processed:    {total_files}")
+        logger.info(f"Total Success:            {success_count}")
+        logger.info(f"Output Root Directory:    {final_output_root}")
+        logger.info(f"Test Mode Active:         {args.test}")
+        logger.info(f"Batch Mode Active:        {args.batch}")
+        logger.info(f"Total Execution Time:     {elapsed_time:.2f} seconds")
+        logger.info("="*60 + "\n")
+        
+    print("Complete")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=".db and .xlsx conversion script")
+    parser = argparse.ArgumentParser(description=".db and .csv conversion script")
     
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--xd", action="store_true", help="Convert Excel to DB")
-    mode.add_argument("--dx", action="store_true", help="Convert DB to Excel")
+    mode.add_argument("--cd", action="store_true", help="Convert CSV to DB")
+    mode.add_argument("--dc", action="store_true", help="Convert DB to CSV")
     
-    parser.add_argument("-i", "--source_directory", required=True, help="Path to input files")
-    parser.add_argument("-o", "--output_directory", required=True, help="Path to save output")
+    parser.add_argument("-i", "--input", default=None, help="Path to input file/folder (Defaults to CWD)")
+    parser.add_argument("-o", "--output", default=None, help="Path to save output (Defaults to CWD)")
+    parser.add_argument("-b", "--batch", action="store_true", help="Process directories recursively instead of a single file")
+    parser.add_argument("-f", "--folder_name", default=None, help="Optional: Create a specific folder inside the output directory")
+    parser.add_argument("-t", "--test", action="store_true", help="Run in test mode (only processes files starting with 'test')")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable detailed logging output")
     
-    parser.add_argument("-c", "--combine", action="store_true", help="Combine multiple DBs into a single Excel file (only valid with --dx)")
-    parser.add_argument("-s", "--split", action="store_true", help="Split a single Excel file into multiple DBs based on the Source File column (only valid with --xd)")
+    parser.add_argument("-c", "--combine", action="store_true", help="Combine multiple DBs into a single CSV (only valid with --dc)")
+    parser.add_argument("-s", "--split", action="store_true", help="Split a single CSV into multiple DBs based on Source File column (only valid with --cd)")
     
     args = parser.parse_args()
     
-    if args.combine and not args.dx:
-        parser.error("--combine can only be used with --dx")
-    if args.split and not args.xd:
-        parser.error("--split can only be used with --xd")
+    if args.combine and not args.dc:
+        parser.error("--combine can only be used with --dc")
+    if args.split and not args.cd:
+        parser.error("--split can only be used with --cd")
     
-    start_time = time.time()
-    
-    if args.xd:
-        process_excel_directory(args.source_directory, args.output_directory, split=args.split)
-    elif args.dx:
-        process_db_directory(args.source_directory, args.output_directory, combine=args.combine)
-
-    elapsed_time = time.time() - start_time
-    print(f"Total execution time: {elapsed_time:.2f} seconds")
+    try:
+        process_pipeline(args)
+    except Exception as err:
+        logger.error(err)
+        sys.exit(1)
