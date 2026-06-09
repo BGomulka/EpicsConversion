@@ -1,0 +1,15 @@
+Record Type,Record Name,Description
+ai,VAC_SYSTEM:CHAMBER:Pressure_RBV,Chamber vacuum pressure reading
+ai,VAC_SYSTEM:TURBO:Speed_RBV,Turbo pump speed reading
+ao,VAC_SYSTEM:CHAMBER:Pressure_SP,Chamber pressure setpoint
+ao,VAC_SYSTEM:TURBO:Speed_SP,Turbo pump speed setpoint
+bi,VAC_SYSTEM:ROUGH:Valve_Stat,Roughing valve isolation status
+bo,VAC_SYSTEM:ROUGH:Valve_Cmd,Roughing valve control command
+calc,VAC_SYSTEM:CALC:LeakRate,Calculated system leak rate
+calc,VAC_SYSTEM:CALC:Efficiency,Calculated pump efficiency factor
+stringin,VAC_SYSTEM:STR:StatusMsg,System status text message
+waveform,VAC_SYSTEM:WAV:HistoryData,Array of historical array samples
+UNKNOWN_TYPE,VAC_SYSTEM:BAD:Record,Should parse into its own column dynamically
+ai,,Missing name row
+,VAC_SYSTEM:LOST:Record,Missing type row
+BI,NaN,String literal NaN check
